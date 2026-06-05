@@ -174,7 +174,7 @@ async def monitor_wallets(app):
                             )
                         tx_history[wallet].add(sig)
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(15)
         except Exception as e:
             print(f"Error: {e}")
             await asyncio.sleep(10)
