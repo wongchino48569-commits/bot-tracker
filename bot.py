@@ -21,6 +21,7 @@ STABLE_TOKENS = [
 ]
 
 MIN_USD = 50
+MAX_DELAY_SECONDS = 300
 bot_aktif = True
 tx_history = {wallet: set() for wallet in WALLETS.values()}
 sol_price_cache = {"price": 150, "last_update": 0}
@@ -85,6 +86,11 @@ def parse_tx(tx):
         if tx_type != "SWAP":
             return None
 
+        tx_time = tx.get("timestamp", 0)
+        now = datetime.now(timezone.utc).timestamp()
+        if now - tx_time > MAX_DELAY_SECONDS:
+            return None
+
         token_transfers = tx.get("tokenTransfers", [])
         native_transfers = tx.get("nativeTransfers", [])
         fee_payer = tx.get("feePayer", "")
@@ -111,9 +117,9 @@ def parse_tx(tx):
         min_sol = MIN_USD / sol_price
 
         if sol_out > min_sol and token_in and token_in not in STABLE_TOKENS:
-            return {"sig": sig, "action": "BUY", "mint": token_in, "sol": round(sol_out, 4), "amount": amount_in, "usd": round(sol_out * sol_price, 2)}
+            return {"sig": sig, "action": "BUY", "mint": token_in, "sol": round(sol_out, 4), "amount": amount_in, "usd": round(sol_out * sol_price, 2), "time": tx_time}
         elif token_out and token_out not in STABLE_TOKENS and (sol_in > min_sol or (token_in and token_in in STABLE_TOKENS)):
-            return {"sig": sig, "action": "SELL", "mint": token_out, "sol": round(sol_in, 4), "amount": amount_out, "usd": round(sol_in * sol_price, 2)}
+            return {"sig": sig, "action": "SELL", "mint": token_out, "sol": round(sol_in, 4), "amount": amount_out, "usd": round(sol_in * sol_price, 2), "time": tx_time}
 
         return None
     except:
@@ -137,9 +143,10 @@ async def monitor_wallets(app):
                         parsed = parse_tx(tx)
                         if parsed:
                             token_name, price, mcap = get_token_info(parsed["mint"])
-                            utc_time = datetime.now(timezone.utc)
-                            wib_hour = (utc_time.hour + 7) % 24
-                            waktu = f"{utc_time.strftime('%H:%M:%S')} UTC ({wib_hour:02d}:{utc_time.strftime('%M')} WIB)"
+                            
+                            tx_time = datetime.fromtimestamp(parsed["time"], tz=timezone.utc)
+                            wib_hour = (tx_time.hour + 7) % 24
+                            waktu = f"{tx_time.strftime('%H:%M:%S')} UTC ({wib_hour:02d}:{tx_time.strftime('%M')} WIB)"
 
                             if parsed["action"] == "BUY":
                                 emoji = "🟢"
