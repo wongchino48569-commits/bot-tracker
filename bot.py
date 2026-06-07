@@ -37,6 +37,7 @@ last_hour = -1
 open_positions = {}
 daily_stats = {name: {"buy": 0, "sell": 0, "spent": 0, "pnl": 0} for name in WALLETS.keys()}
 wib_tz = pytz.timezone("Asia/Jakarta")
+app = None
 
 def get_sol_price():
     try:
@@ -122,7 +123,7 @@ def parse_tx(tx):
     except:
         return None
 
-async def send_notif(app, name, parsed, token_name, price, mcap):
+async def send_notif(name, parsed, token_name, price, mcap):
     tx_time_utc = datetime.fromtimestamp(parsed["time"], tz=timezone.utc)
     tx_time_wib = tx_time_utc.astimezone(wib_tz)
     waktu = tx_time_utc.strftime("%H:%M:%S UTC") + " | " + tx_time_wib.strftime("%H:%M:%S WIB")
@@ -150,7 +151,7 @@ async def send_notif(app, name, parsed, token_name, price, mcap):
     pesan += "🔗 [Solscan](https://solscan.io/tx/" + parsed["sig"] + ") | 📊 [DexScreener](https://dexscreener.com/solana/" + parsed["mint"] + ")"
     await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=pesan, parse_mode="Markdown")
 
-async def send_recap(app):
+async def send_recap():
     tanggal = datetime.now(timezone.utc).strftime("%d %B %Y")
     pesan = "📊 *Daily Recap - " + tanggal + "*\n━━━━━━━━━━━━━━━\n"
     ada_data = False
@@ -172,7 +173,7 @@ async def send_recap(app):
     for name in daily_stats:
         daily_stats[name] = {"buy": 0, "sell": 0, "spent": 0, "pnl": 0}
 
-async def monitor_wallets(app):
+async def monitor_wallets():
     global recap_sent, last_hour, hourly_slot
     while True:
         try:
@@ -185,7 +186,7 @@ async def monitor_wallets(app):
                 hourly_slot = {"BUY": False, "SELL": False}
                 last_hour = wib_hour
             if wib_hour == 20 and utc_now.minute == 0 and not recap_sent:
-                await send_recap(app)
+                await send_recap()
                 recap_sent = True
             elif wib_hour != 20:
                 recap_sent = False
@@ -206,7 +207,7 @@ async def monitor_wallets(app):
                     open_key = name + "_" + mint
                     if action == "SELL" and open_key in open_positions:
                         token_name, price, mcap = get_token_info(mint)
-                        await send_notif(app, name, parsed, token_name, price, mcap)
+                        await send_notif(name, parsed, token_name, price, mcap)
                         daily_stats[name]["sell"] += 1
                         daily_stats[name]["pnl"] += parsed["usd"]
                         del open_positions[open_key]
@@ -216,7 +217,7 @@ async def monitor_wallets(app):
                         if not hourly_slot["BUY"]:
                             hourly_slot["BUY"] = True
                             token_name, price, mcap = get_token_info(mint)
-                            await send_notif(app, name, parsed, token_name, price, mcap)
+                            await send_notif(name, parsed, token_name, price, mcap)
                             daily_stats[name]["buy"] += 1
                             daily_stats[name]["spent"] += parsed["usd"]
                             daily_stats[name]["pnl"] -= parsed["usd"]
@@ -225,7 +226,7 @@ async def monitor_wallets(app):
                         if not hourly_slot["SELL"]:
                             hourly_slot["SELL"] = True
                             token_name, price, mcap = get_token_info(mint)
-                            await send_notif(app, name, parsed, token_name, price, mcap)
+                            await send_notif(name, parsed, token_name, price, mcap)
                             daily_stats[name]["sell"] += 1
                             daily_stats[name]["pnl"] += parsed["usd"]
                     tx_history[wallet].add(sig)
@@ -247,7 +248,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(pesan, parse_mode="Markdown")
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_recap(app)
+    await send_recap()
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_aktif
@@ -259,24 +260,22 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_aktif = False
     await update.message.reply_text("⛔ Bot berhenti!")
 
-async def main():
-    global app
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("recap", cmd_recap))
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("stop", cmd_stop))
+async def post_init(application):
     sol_price = get_sol_price()
-    await app.initialize()
-    await app.start()
-    await app.bot.send_message(
+    await application.bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
         text="👁️ *Wallet Tracker V4 AKTIF!*\n\n🐋 Monitoring 9 wallet\n💲 SOL: $" + str(round(sol_price, 2)) + "\n🎯 Min trade: $" + str(MIN_USD) + "\n📊 Notif: 1 BUY + 1 SELL per jam\n🔄 Open position lintas jam\n📋 Recap: 20:00 WIB\n\n/status /recap /start /stop",
         parse_mode="Markdown"
     )
-    await asyncio.gather(
-        app.updater.start_polling(),
-        monitor_wallets(app)
-    )
+    asyncio.create_task(monitor_wallets())
 
-asyncio.run(main())
+def main():
+    global app
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("recap", cmd_recap))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.run_polling()
+
+main()
