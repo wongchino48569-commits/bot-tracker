@@ -1,13 +1,13 @@
 import requests
 import asyncio
 import json
-from datetime import datetime, timezone
-from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import threading
 import pytz
 import uvicorn
-import threading
+from datetime import datetime, timezone
+from fastapi import FastAPI, Request
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 TELEGRAM_TOKEN = "8807718291:AAGNQW4I7Tswp9FtgpwD28vbA6tO6ZoLtD0"
 TELEGRAM_CHAT_ID = "-1003734394227"
@@ -37,23 +37,23 @@ MIN_USD = 150
 bot_aktif = True
 sol_price_cache = {"price": 150, "last_update": 0}
 recap_sent = False
-hourly_slot = {}
+hourly_slot = {"BUY": False, "SELL": False}
 last_hour = -1
 open_positions = {}
 daily_stats = {name: {"buy": 0, "sell": 0, "spent": 0, "pnl": 0} for name in WALLETS.keys()}
 tx_seen = set()
-
-app_fastapi = FastAPI()
-tg_app = None
 wib_tz = pytz.timezone("Asia/Jakarta")
+
+bot = Bot(token=TELEGRAM_TOKEN)
+loop = asyncio.new_event_loop()
+app_fastapi = FastAPI()
 
 def get_sol_price():
     try:
         now = datetime.now(timezone.utc).timestamp()
         if now - sol_price_cache["last_update"] < 300:
             return sol_price_cache["price"]
-        url = "https://api.dexscreener.com/tokens/v1/solana/So11111111111111111111111111111111111111112"
-        r = requests.get(url, timeout=10)
+        r = requests.get("https://api.dexscreener.com/tokens/v1/solana/So11111111111111111111111111111111111111112", timeout=10)
         data = r.json()
         if isinstance(data, list) and len(data) > 0:
             price = float(data[0].get("priceUsd", 150))
@@ -66,8 +66,7 @@ def get_sol_price():
 
 def get_token_info(mint):
     try:
-        url = "https://api.dexscreener.com/tokens/v1/solana/" + mint
-        r = requests.get(url, timeout=10)
+        r = requests.get("https://api.dexscreener.com/tokens/v1/solana/" + mint, timeout=10)
         data = r.json()
         if isinstance(data, list) and len(data) > 0:
             pair = data[0]
@@ -92,7 +91,7 @@ def format_mcap(mcap):
     except:
         return "?"
 
-def parse_tx(tx, wallet_address):
+def parse_tx(tx):
     try:
         sig = tx.get("signature", "")
         if tx.get("type", "") != "SWAP":
@@ -126,7 +125,7 @@ def parse_tx(tx, wallet_address):
     except:
         return None
 
-async def send_notif(name, parsed, token_name, price, mcap):
+def send_notif_sync(name, parsed, token_name, price, mcap):
     tx_time_utc = datetime.fromtimestamp(parsed["time"], tz=timezone.utc)
     tx_time_wib = tx_time_utc.astimezone(wib_tz)
     waktu = tx_time_utc.strftime("%H:%M:%S UTC") + " | " + tx_time_wib.strftime("%H:%M:%S WIB")
@@ -140,7 +139,6 @@ async def send_notif(name, parsed, token_name, price, mcap):
         sol_text = "Received: " + str(parsed["sol"]) + " SOL (approx $" + str(parsed["usd"]) + ")"
     amount_fmt = str(int(float(parsed["amount"]))) if parsed["amount"] else "?"
     price_fmt = "$" + str(round(price, 8)) if price > 0 else "?"
-    mcap_fmt = format_mcap(mcap)
     pesan = emoji + " *Wallet Alert!*\n"
     pesan += "━━━━━━━━━━━━━━━\n"
     pesan += "👤 *Wallet:* " + name + "\n"
@@ -149,69 +147,18 @@ async def send_notif(name, parsed, token_name, price, mcap):
     pesan += "📦 *Amount:* " + amount_fmt + " " + token_name + "\n"
     pesan += "💵 *" + sol_text + "*\n"
     pesan += "💲 *Price:* " + price_fmt + "\n"
-    pesan += "📈 *MCap:* " + mcap_fmt + "\n"
+    pesan += "📈 *MCap:* " + format_mcap(mcap) + "\n"
     pesan += "🕐 *Time:* " + waktu + "\n"
     pesan += "━━━━━━━━━━━━━━━\n"
     pesan += "🔗 [Solscan](https://solscan.io/tx/" + parsed["sig"] + ") | 📊 [DexScreener](https://dexscreener.com/solana/" + parsed["mint"] + ")"
-    await tg_app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=pesan, parse_mode="Markdown")
+    asyncio.run_coroutine_threadsafe(
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=pesan, parse_mode="Markdown"),
+        loop
+    ).result()
 
-async def process_tx(name, tx):
-    global last_hour, hourly_slot, recap_sent
-    sig = tx.get("signature", "")
-    if not sig or sig in tx_seen:
-        return
-    tx_seen.add(sig)
-
-    utc_now = datetime.now(timezone.utc)
-    wib_hour = utc_now.astimezone(wib_tz).hour
-
-    if wib_hour != last_hour:
-        hourly_slot = {"BUY": False, "SELL": False}
-        last_hour = wib_hour
-
-    if wib_hour == 20 and utc_now.minute == 0 and not recap_sent:
-        await send_recap()
-        recap_sent = True
-    elif wib_hour != 20:
-        recap_sent = False
-
-    parsed = parse_tx(tx, WALLETS.get(name, ""))
-    if not parsed:
-        return
-
-    action = parsed["action"]
-    mint = parsed["mint"]
-    open_key = name + "_" + mint
-
-    if action == "SELL" and open_key in open_positions:
-        token_name, price, mcap = get_token_info(mint)
-        await send_notif(name, parsed, token_name, price, mcap)
-        daily_stats[name]["sell"] += 1
-        daily_stats[name]["pnl"] += parsed["usd"]
-        del open_positions[open_key]
-        return
-
-    if action == "BUY":
-        if not hourly_slot["BUY"]:
-            hourly_slot["BUY"] = True
-            token_name, price, mcap = get_token_info(mint)
-            await send_notif(name, parsed, token_name, price, mcap)
-            daily_stats[name]["buy"] += 1
-            daily_stats[name]["spent"] += parsed["usd"]
-            daily_stats[name]["pnl"] -= parsed["usd"]
-            open_positions[open_key] = parsed
-    elif action == "SELL":
-        if not hourly_slot["SELL"]:
-            hourly_slot["SELL"] = True
-            token_name, price, mcap = get_token_info(mint)
-            await send_notif(name, parsed, token_name, price, mcap)
-            daily_stats[name]["sell"] += 1
-            daily_stats[name]["pnl"] += parsed["usd"]
-
-async def send_recap():
+def send_recap_sync():
     tanggal = datetime.now(timezone.utc).strftime("%d %B %Y")
-    pesan = "📊 *Daily Recap - " + tanggal + "*\n"
-    pesan += "━━━━━━━━━━━━━━━\n"
+    pesan = "📊 *Daily Recap - " + tanggal + "*\n━━━━━━━━━━━━━━━\n"
     ada_data = False
     for name, stats in daily_stats.items():
         if stats["buy"] == 0 and stats["sell"] == 0:
@@ -227,13 +174,69 @@ async def send_recap():
     if not ada_data:
         pesan += "\n_Tidak ada transaksi hari ini._\n"
     pesan += "\n━━━━━━━━━━━━━━━"
-    await tg_app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=pesan, parse_mode="Markdown")
+    asyncio.run_coroutine_threadsafe(
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=pesan, parse_mode="Markdown"),
+        loop
+    ).result()
     for name in daily_stats:
         daily_stats[name] = {"buy": 0, "sell": 0, "spent": 0, "pnl": 0}
 
+def process_tx_sync(name, tx):
+    global last_hour, hourly_slot, recap_sent
+    sig = tx.get("signature", "")
+    if not sig or sig in tx_seen:
+        return
+    tx_seen.add(sig)
+
+    utc_now = datetime.now(timezone.utc)
+    wib_hour = utc_now.astimezone(wib_tz).hour
+
+    if wib_hour != last_hour:
+        hourly_slot = {"BUY": False, "SELL": False}
+        last_hour = wib_hour
+
+    if wib_hour == 20 and utc_now.minute == 0 and not recap_sent:
+        send_recap_sync()
+        recap_sent = True
+    elif wib_hour != 20:
+        recap_sent = False
+
+    parsed = parse_tx(tx)
+    if not parsed:
+        return
+
+    action = parsed["action"]
+    mint = parsed["mint"]
+    open_key = name + "_" + mint
+
+    if action == "SELL" and open_key in open_positions:
+        token_name, price, mcap = get_token_info(mint)
+        send_notif_sync(name, parsed, token_name, price, mcap)
+        daily_stats[name]["sell"] += 1
+        daily_stats[name]["pnl"] += parsed["usd"]
+        del open_positions[open_key]
+        return
+
+    if action == "BUY":
+        if not hourly_slot["BUY"]:
+            hourly_slot["BUY"] = True
+            token_name, price, mcap = get_token_info(mint)
+            send_notif_sync(name, parsed, token_name, price, mcap)
+            daily_stats[name]["buy"] += 1
+            daily_stats[name]["spent"] += parsed["usd"]
+            daily_stats[name]["pnl"] -= parsed["usd"]
+            open_positions[open_key] = parsed
+    elif action == "SELL":
+        if not hourly_slot["SELL"]:
+            hourly_slot["SELL"] = True
+            token_name, price, mcap = get_token_info(mint)
+            send_notif_sync(name, parsed, token_name, price, mcap)
+            daily_stats[name]["sell"] += 1
+            daily_stats[name]["pnl"] += parsed["usd"]
+
 @app_fastapi.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "Wallet Tracker V5 running"}
 
 @app_fastapi.post("/webhook")
 async def webhook(request: Request):
@@ -246,59 +249,61 @@ async def webhook(request: Request):
                 fee_payer = tx.get("feePayer", "")
                 name = WALLET_BY_ADDRESS.get(fee_payer)
                 if name:
-                    asyncio.create_task(process_tx(name, tx))
+                    threading.Thread(target=process_tx_sync, args=(name, tx), daemon=True).start()
     except Exception as e:
         print("Webhook error: " + str(e))
     return {"status": "ok"}
 
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@app_fastapi.post("/telegram")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot)
+        text = update.message.text if update.message else ""
+        chat_id = update.message.chat_id if update.message else None
+        if not chat_id:
+            return {"ok": True}
+        if text == "/status":
+            sol_price = get_sol_price()
+            status = "✅ Aktif" if bot_aktif else "⛔ Berhenti"
+            pesan = "👁️ *Wallet Tracker*: " + status + "\n\n"
+            pesan += "💲 *SOL Price:* $" + str(round(sol_price, 2)) + "\n"
+            pesan += "🎯 *Min Trade:* $" + str(MIN_USD) + "\n\n"
+            pesan += "📂 *Open Positions:* " + str(len(open_positions)) + "\n\n"
+            pesan += "🐋 *Monitoring:*\n"
+            for name in WALLETS.keys():
+                pesan += "• " + name + "\n"
+            await bot.send_message(chat_id=chat_id, text=pesan, parse_mode="Markdown")
+        elif text == "/recap":
+            threading.Thread(target=send_recap_sync, daemon=True).start()
+        elif text == "/start":
+            global bot_aktif
+            bot_aktif = True
+            await bot.send_message(chat_id=chat_id, text="✅ Bot aktif!")
+        elif text == "/stop":
+            bot_aktif = False
+            await bot.send_message(chat_id=chat_id, text="⛔ Bot berhenti!")
+    except Exception as e:
+        print("Telegram webhook error: " + str(e))
+    return {"ok": True}
+
+def run_loop():
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+threading.Thread(target=run_loop, daemon=True).start()
+
+async def startup():
     sol_price = get_sol_price()
-    status = "✅ Aktif" if bot_aktif else "⛔ Berhenti"
-    pesan = "👁️ *Wallet Tracker*: " + status + "\n\n"
-    pesan += "💲 *SOL Price:* $" + str(round(sol_price, 2)) + "\n"
-    pesan += "🎯 *Min Trade:* $" + str(MIN_USD) + "\n\n"
-    pesan += "📂 *Open Positions:* " + str(len(open_positions)) + "\n\n"
-    pesan += "🐋 *Monitoring:*\n"
-    for name in WALLETS.keys():
-        pesan += "• " + name + "\n"
-    await update.message.reply_text(pesan, parse_mode="Markdown")
-
-async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_recap()
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_aktif
-    bot_aktif = True
-    await update.message.reply_text("✅ Bot aktif!")
-
-async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_aktif
-    bot_aktif = False
-    await update.message.reply_text("⛔ Bot berhenti!")
-
-async def run_bot():
-    global tg_app
-    tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
-    tg_app.add_handler(CommandHandler("status", cmd_status))
-    tg_app.add_handler(CommandHandler("recap", cmd_recap))
-    tg_app.add_handler(CommandHandler("start", cmd_start))
-    tg_app.add_handler(CommandHandler("stop", cmd_stop))
-    await tg_app.initialize()
-    await tg_app.start()
-    sol_price = get_sol_price()
-    await tg_app.bot.send_message(
+    webhook_url = "https://bot-tracker-v2-production.up.railway.app/telegram"
+    await bot.set_webhook(url=webhook_url)
+    await bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
-        text="👁️ *Wallet Tracker V5 AKTIF!*\n\n🐋 Monitoring 9 wallet\n💲 SOL: $" + str(round(sol_price, 2)) + "\n🎯 Min trade: $" + str(MIN_USD) + "\n⚡ Mode: Webhook (hemat kredit)\n📋 Recap: 20:00 WIB\n\n/status /recap /start /stop",
+        text="👁️ *Wallet Tracker V5 AKTIF!*\n\n🐋 Monitoring 9 wallet\n💲 SOL: $" + str(round(sol_price, 2)) + "\n🎯 Min trade: $" + str(MIN_USD) + "\n⚡ Mode: Webhook\n📋 Recap: 20:00 WIB\n\n/status /recap /start /stop",
         parse_mode="Markdown"
     )
 
-def start_bot_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_bot())
-    loop.run_forever()
-
-threading.Thread(target=start_bot_thread, daemon=True).start()
+app_fastapi.add_event_handler("startup", startup)
 
 if __name__ == "__main__":
     uvicorn.run(app_fastapi, host="0.0.0.0", port=8000)
