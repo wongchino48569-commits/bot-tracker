@@ -5,7 +5,7 @@ import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-TELEGRAM_TOKEN = "8807718291:AAEvNKTmO7-_XPCOTMZHblNvixPR89GymEM"
+TELEGRAM_TOKEN = "8807718291:AAG5NNzMF5dtlwMj9_fsm-fG0nL0I1nuJrM"
 TELEGRAM_CHAT_ID = "-1003734394227"
 HELIUS_API_KEY = "ba8f7f3b-e484-46b2-b3be-c9fec23cc177"
 
