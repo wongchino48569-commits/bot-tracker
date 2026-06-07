@@ -277,7 +277,6 @@ async def telegram_webhook(request: Request):
         elif text == "/recap":
             threading.Thread(target=send_recap_sync, daemon=True).start()
         elif text == "/start":
-            global bot_aktif
             bot_aktif = True
             await bot.send_message(chat_id=chat_id, text="✅ Bot aktif!")
         elif text == "/stop":
