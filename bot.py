@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-TELEGRAM_TOKEN = "8807718291:AAGNQW4I7Tswp9FtgpwD28vbA6tO6ZoLtD0"
+TELEGRAM_TOKEN = "8807718291:AAF3CKdku3B2uy3FNW6qfITjFleSmGbgJVI"
 TELEGRAM_CHAT_ID = "-1003734394227"
 ALCHEMY_API_KEY = "XROPo8Klz07GCVxHUNwmU"
 ALCHEMY_URL = "https://solana-mainnet.g.alchemy.com/v2/" + ALCHEMY_API_KEY
